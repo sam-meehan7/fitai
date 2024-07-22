@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 # Initialize OpenAI API key and Assistant ID from environment variables
 openai_api_key = os.getenv("OPENAI_API_KEY")
 assistant_id = os.getenv("ASSISTANT_ID")
-supabase_url = os.getenv("SUPABASE_URL_LOCAL")
-supabase_key = os.getenv("SUPABASE_KEY_LOCAL")
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 
 # Define user profile storage
