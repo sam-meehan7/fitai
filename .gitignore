@@ -1,0 +1,6 @@
+.env
+.DS_Store
+*.mp3
+*.json
+*.jsonl
+__pycache__/
