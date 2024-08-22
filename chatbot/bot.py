@@ -41,11 +41,6 @@ STATES['ONGOING'] = len(STATES)
 async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
     user_profiles[chat_id] = {}
-
-    # Create the thread at the start of the conversation
-    thread = create_thread()
-    context.user_data['thread'] = thread
-
     await context.bot.send_message(chat_id=chat_id, text="Hi there! Welcome to FitAI. Let's get started with some basic information about you and we can get it over to one of our Personal Trainers and get you started.")
     return await ask_next_question(update, context)
 
@@ -97,10 +92,15 @@ async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         user_response = supabase.table("users").upsert(user_data, on_conflict="email").execute()
         user_id = user_response.data[0]['id']
 
-        # Get the thread that was created at the start of the conversation
-        thread = context.user_data['thread']
+        # Create the thread at the end of the profile collection
+        thread = create_thread()
+        thread_id = thread.id  # Extract the thread ID
+        context.user_data['thread_id'] = thread_id  # Store only the thread ID
+
         if not thread or not thread.id:
             raise Exception("Thread not found or invalid")
+
+        context.user_data['thread_id'] = thread.id  # Store only the thread ID
 
         # Create assistant session in Supabase with initial state 'STARTED'
         session_data = {
@@ -117,12 +117,11 @@ async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         profile_summary = "\n".join([f"{key.capitalize()}: {value}" for key, value in user_profile.items()])
         await context.bot.send_message(chat_id=chat_id, text=f"Thanks for providing your information. I've forwarded it to one of our PTs, they will be with you shortly!")
 
-        # Proceed to interacting with the LLM
         create_message(thread.id, profile_summary)
         logger.info(f"Created message in thread ID: {thread.id}")
 
         run = create_run(thread.id)
-        run = wait_on_run(run, thread)
+        run = wait_on_run(run, thread.id)
         logger.info(f"Run status: {run.status}")
 
         messages_page = list_messages(thread.id)
@@ -148,31 +147,31 @@ async def handle_ongoing_conversation(update: Update, context: ContextTypes.DEFA
     chat_id = update.effective_chat.id
     user_message = update.message.text
 
-    thread = context.user_data['thread']
-    create_message(thread.id, user_message)
-    logger.info(f"Created message in thread ID: {thread.id}")
+    thread_id = context.user_data['thread_id']  # Retrieve the thread ID
+    create_message(thread_id, user_message)
+    logger.info(f"Created message in thread ID: {thread_id}")
 
     try:
-        run = create_run(thread.id)
+        run = create_run(thread_id)
     except BadRequestError as e:
         if "already has an active run" in str(e):
             # Get the active run
-            runs = client.beta.threads.runs.list(thread_id=thread.id, limit=1)
+            runs = client.beta.threads.runs.list(thread_id=thread_id, limit=1)
             if runs.data:
                 active_run = runs.data[0]
                 # Wait for the active run to complete
-                run = wait_on_run(active_run, thread)
+                run = wait_on_run(active_run, thread_id)
             else:
-                logger.error(f"No active run found for thread {thread.id}")
+                logger.error(f"No active run found for thread {thread_id}")
                 await context.bot.send_message(chat_id=chat_id, text="I'm sorry, but there was an error processing your request. Please try again later.")
                 return STATES['ONGOING']
         else:
             raise e
 
-    run = wait_on_run(run, thread)
+    run = wait_on_run(run, thread_id)
     logger.info(f"Run status: {run.status}")
 
-    messages_page = list_messages(thread.id)
+    messages_page = list_messages(thread_id)
     messages = messages_page.data if hasattr(messages_page, 'data') else []
     logger.info(f"Retrieved messages: {messages}")
 

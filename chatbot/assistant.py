@@ -27,10 +27,10 @@ def create_run(thread_id):
         assistant_id=os.getenv("ASSISTANT_ID")
     )
 
-def wait_on_run(run, thread):
+def wait_on_run(run, thread_id):
     while run.status == "queued" or run.status == "in_progress":
         run = client.beta.threads.runs.retrieve(
-            thread_id=thread.id,
+            thread_id=thread_id,
             run_id=run.id,
         )
         time.sleep(0.5)
