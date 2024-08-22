@@ -135,7 +135,7 @@ async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         supabase.table("assistant_sessions").update({"state": "ONGOING"}).eq("id", session_id).execute()
 
         logger.info(f"Assistant's response: {response}")
-        await context.bot.send_message(chat_id=chat_id, text=response)
+        await context.bot.send_message(chat_id=chat_id, text=response, parse_mode='Markdown')
 
         return STATES['ONGOING']
 
@@ -179,7 +179,7 @@ async def handle_ongoing_conversation(update: Update, context: ContextTypes.DEFA
     response = next((msg.content[0].text.value for msg in messages if msg.role == 'assistant'), "No response from assistant.")
 
     logger.info(f"Assistant's response: {response}")
-    await context.bot.send_message(chat_id=chat_id, text=response)
+    await context.bot.send_message(chat_id=chat_id, text=response, parse_mode='Markdown')
 
     return STATES['ONGOING']
 
