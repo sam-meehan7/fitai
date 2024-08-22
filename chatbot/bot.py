@@ -56,7 +56,20 @@ async def ask_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if current_state >= 0:
         # Save the answer to the previous question
         question_key = list(QUESTIONS.keys())[current_state]
-        user_profiles[chat_id][question_key.lower()] = update.message.text
+        answer = update.message.text
+
+        # Validate the answer if the question is 'AGE'
+        if question_key == 'AGE':
+            try:
+                age = int(answer)
+                if age <= 0:
+                    raise ValueError("Age must be a positive integer.")
+                user_profiles[chat_id][question_key.lower()] = age
+            except ValueError:
+                await context.bot.send_message(chat_id=chat_id, text="Please enter a valid age (must be a number).")
+                return current_state
+        else:
+            user_profiles[chat_id][question_key.lower()] = answer
 
     next_state = current_state + 1
     if next_state < len(QUESTIONS):
