@@ -10,9 +10,15 @@ from openai import BadRequestError
 # Load environment variables
 load_dotenv()
 
-# Set up logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Set up logging for console output only
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
+
+# Reduce noise from httpx library
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Initialize OpenAI API key and Assistant ID from environment variables
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -25,6 +31,8 @@ supabase: Client = create_client(supabase_url, supabase_key)
 SHARE_CONTACT, GET_AGE, GET_WEIGHT, GET_HEIGHT, ONGOING = range(5)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.effective_user
+    logger.info(f"User {user.id} ({user.username}) started the conversation")
     keyboard = [[KeyboardButton("Share Contact", request_contact=True)]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
     await update.message.reply_text(
@@ -40,15 +48,19 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data['phone'] = contact.phone_number
     context.user_data['name'] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
 
+    logger.info(f"Received contact information for user {telegram_id}: {context.user_data['name']}, {context.user_data['phone']}")
+
     # Check if user exists in database
     user_response = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
     if user_response.data:
         user = user_response.data[0]
         context.user_data.update(user)
+        logger.info(f"Existing user {telegram_id} found in database")
         await update_or_create_session(update, context)
         await update.message.reply_text(f"Welcome back, {context.user_data['name']}! How can I assist you today?", reply_markup=ReplyKeyboardRemove())
         return ONGOING
     else:
+        logger.info(f"New user {telegram_id} - requesting age")
         await update.message.reply_text("Thanks for sharing your contact. Now, please tell me your age.")
         return GET_AGE
 
@@ -58,9 +70,11 @@ async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if age <= 0 or age > 120:
             raise ValueError()
         context.user_data['age'] = age
+        logger.info(f"User {context.user_data['telegram_id']} age: {age}")
         await update.message.reply_text("Great! Now, what's your current weight in kg?")
         return GET_WEIGHT
     except ValueError:
+        logger.warning(f"Invalid age input from user {context.user_data['telegram_id']}: {update.message.text}")
         await update.message.reply_text("Please enter a valid age between 1 and 120.")
         return GET_AGE
 
@@ -70,9 +84,11 @@ async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if weight <= 0 or weight > 500:
             raise ValueError()
         context.user_data['weight'] = weight
+        logger.info(f"User {context.user_data['telegram_id']} weight: {weight} kg")
         await update.message.reply_text("Excellent! Lastly, what's your height in cm?")
         return GET_HEIGHT
     except ValueError:
+        logger.warning(f"Invalid weight input from user {context.user_data['telegram_id']}: {update.message.text}")
         await update.message.reply_text("Please enter a valid weight in kg (e.g., 70.5).")
         return GET_WEIGHT
 
@@ -82,14 +98,17 @@ async def get_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if height <= 0 or height > 300:
             raise ValueError()
         context.user_data['height'] = height
+        logger.info(f"User {context.user_data['telegram_id']} height: {height} cm")
         return await finalize_profile(update, context)
     except ValueError:
+        logger.warning(f"Invalid height input from user {context.user_data['telegram_id']}: {update.message.text}")
         await update.message.reply_text("Please enter a valid height in cm (e.g., 175.5).")
         return GET_HEIGHT
 
 async def update_or_create_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thread = create_thread()
     context.user_data['thread_id'] = thread.id
+    logger.info(f"Created new thread {thread.id} for user {context.user_data['telegram_id']}")
 
     session_data = {
         "user_id": context.user_data['id'],
@@ -98,6 +117,7 @@ async def update_or_create_session(update: Update, context: ContextTypes.DEFAULT
     }
     session_response = supabase.table("assistant_sessions").insert(session_data).execute()
     context.user_data['session_id'] = session_response.data[0]['id']
+    logger.info(f"Created new session {context.user_data['session_id']} for user {context.user_data['telegram_id']}")
 
 async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
@@ -112,6 +132,7 @@ async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         user_response = supabase.table("users").upsert(user_data, on_conflict="telegram_id").execute()
         context.user_data['id'] = user_response.data[0]['id']
+        logger.info(f"User profile finalized and saved to database: {user_data}")
 
         await update_or_create_session(update, context)
 
@@ -125,17 +146,21 @@ async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         messages = list_messages(context.user_data['thread_id']).data
         response = next((msg.content[0].text.value for msg in messages if msg.role == 'assistant'), "No response from assistant.")
 
+        logger.info(f"Assistant response for user {context.user_data['telegram_id']}: {response[:100]}...")  # Log first 100 chars of response
         await update.message.reply_text(response, parse_mode='Markdown')
         return ONGOING
 
     except Exception as e:
-        logger.error(f"Error in finalize_profile: {str(e)}")
+        logger.error(f"Error in finalize_profile for user {context.user_data['telegram_id']}: {str(e)}")
         await update.message.reply_text("I'm sorry, but there was an error processing your information. Please try again later or contact support.")
         return ConversationHandler.END
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_message = update.message.text
     thread_id = context.user_data['thread_id']
+    user_id = context.user_data['telegram_id']
+
+    logger.info(f"Received message from user {user_id}: {user_message[:50]}...")  # Log first 50 chars of user message
 
     create_message(thread_id, user_message)
     run = create_run(thread_id)
@@ -144,10 +169,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     messages = list_messages(thread_id).data
     response = next((msg.content[0].text.value for msg in messages if msg.role == 'assistant'), "No response from assistant.")
 
+    logger.info(f"Assistant response for user {user_id}: {response[:100]}...")  # Log first 100 chars of response
     await update.message.reply_text(response, parse_mode='Markdown')
     return ONGOING
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} cancelled the conversation")
     await update.message.reply_text("The conversation has been cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
@@ -167,6 +195,7 @@ def main():
     )
 
     application.add_handler(conv_handler)
+    logger.info("FitAI Telegram Bot started")
     application.run_polling()
 
 if __name__ == '__main__':
