@@ -1,12 +1,11 @@
 import os
 import logging
-from telegram import Update
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from assistant import create_thread, create_message, create_run, wait_on_run, list_messages
 from dotenv import load_dotenv
 from supabase.client import create_client, Client
 from openai import BadRequestError
-from openai.types.beta.threads.run import Run
 
 # Load environment variables
 load_dotenv()
@@ -22,181 +21,149 @@ supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 
-# Define user profile storage
-user_profiles = {}
+# Define conversation states
+SHARE_CONTACT, GET_AGE, GET_WEIGHT, GET_HEIGHT, ONGOING = range(5)
 
-# Define questions and their corresponding states
-QUESTIONS = {
-    'NAME': "What's your name?",
-    'EMAIL': "Please provide your email address.",
-    'AGE': "How old are you?",
-    'WEIGHT': "What is your current weight?",
-    'HEIGHT': "What is your height?",
-}
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    keyboard = [[KeyboardButton("Share Contact", request_contact=True)]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+    await update.message.reply_text(
+        "Welcome to FitAI! To get started, please share your contact information.",
+        reply_markup=reply_markup
+    )
+    return SHARE_CONTACT
 
-# Create conversation states dynamically
-STATES = {key: i for i, key in enumerate(QUESTIONS.keys())}
-STATES['ONGOING'] = len(STATES)
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contact = update.message.contact
+    telegram_id = update.effective_user.id
+    context.user_data['telegram_id'] = telegram_id
+    context.user_data['phone'] = contact.phone_number
+    context.user_data['name'] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
 
-async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    user_profiles[chat_id] = {}
-    await context.bot.send_message(chat_id=chat_id, text="Hi there! Welcome to FitAI. Let's get started with some basic information about you and we can get it over to one of our Personal Trainers and get you started.")
-    return await ask_next_question(update, context)
-
-async def ask_next_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    current_state = context.user_data.get('state', -1)
-
-    if current_state >= 0:
-        # Save the answer to the previous question
-        question_key = list(QUESTIONS.keys())[current_state]
-        answer = update.message.text
-
-        # Validate the answer if the question is 'AGE'
-        if question_key == 'AGE':
-            try:
-                age = int(answer)
-                if age <= 0:
-                    raise ValueError("Age must be a positive integer.")
-                user_profiles[chat_id][question_key.lower()] = age
-            except ValueError:
-                await context.bot.send_message(chat_id=chat_id, text="Please enter a valid age (must be a number).")
-                return current_state
-        else:
-            user_profiles[chat_id][question_key.lower()] = answer
-
-    next_state = current_state + 1
-    if next_state < len(QUESTIONS):
-        question = list(QUESTIONS.values())[next_state]
-        await context.bot.send_message(chat_id=chat_id, text=question)
-        context.user_data['state'] = next_state
-        return next_state
+    # Check if user exists in database
+    user_response = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
+    if user_response.data:
+        user = user_response.data[0]
+        context.user_data.update(user)
+        await update_or_create_session(update, context)
+        await update.message.reply_text(f"Welcome back, {context.user_data['name']}! How can I assist you today?", reply_markup=ReplyKeyboardRemove())
+        return ONGOING
     else:
+        await update.message.reply_text("Thanks for sharing your contact. Now, please tell me your age.")
+        return GET_AGE
+
+async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        age = int(update.message.text)
+        if age <= 0 or age > 120:
+            raise ValueError()
+        context.user_data['age'] = age
+        await update.message.reply_text("Great! Now, what's your current weight in kg?")
+        return GET_WEIGHT
+    except ValueError:
+        await update.message.reply_text("Please enter a valid age between 1 and 120.")
+        return GET_AGE
+
+async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        weight = float(update.message.text)
+        if weight <= 0 or weight > 500:
+            raise ValueError()
+        context.user_data['weight'] = weight
+        await update.message.reply_text("Excellent! Lastly, what's your height in cm?")
+        return GET_HEIGHT
+    except ValueError:
+        await update.message.reply_text("Please enter a valid weight in kg (e.g., 70.5).")
+        return GET_WEIGHT
+
+async def get_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        height = float(update.message.text)
+        if height <= 0 or height > 300:
+            raise ValueError()
+        context.user_data['height'] = height
         return await finalize_profile(update, context)
+    except ValueError:
+        await update.message.reply_text("Please enter a valid height in cm (e.g., 175.5).")
+        return GET_HEIGHT
+
+async def update_or_create_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    thread = create_thread()
+    context.user_data['thread_id'] = thread.id
+
+    session_data = {
+        "user_id": context.user_data['id'],
+        "thread_id": thread.id,
+        "state": "ONGOING"
+    }
+    session_response = supabase.table("assistant_sessions").insert(session_data).execute()
+    context.user_data['session_id'] = session_response.data[0]['id']
 
 async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    user_profile = user_profiles[chat_id]
-
     try:
-        # Create user in Supabase with collected information
         user_data = {
-            "name": user_profile['name'],
-            "email": user_profile['email'],
-            "age": int(user_profile['age']),
-            "weight": user_profile['weight'],
-            "height": user_profile['height'],
+            "telegram_id": context.user_data['telegram_id'],
+            "name": context.user_data['name'],
+            "phone": context.user_data['phone'],
+            "age": context.user_data['age'],
+            "weight": context.user_data['weight'],
+            "height": context.user_data['height'],
         }
 
-        user_response = supabase.table("users").upsert(user_data, on_conflict="email").execute()
-        user_id = user_response.data[0]['id']
+        user_response = supabase.table("users").upsert(user_data, on_conflict="telegram_id").execute()
+        context.user_data['id'] = user_response.data[0]['id']
 
-        # Create the thread at the end of the profile collection
-        thread = create_thread()
-        thread_id = thread.id  # Extract the thread ID
-        context.user_data['thread_id'] = thread_id  # Store only the thread ID
+        await update_or_create_session(update, context)
 
-        if not thread or not thread.id:
-            raise Exception("Thread not found or invalid")
+        profile_summary = "\n".join([f"{key.capitalize()}: {value}" for key, value in user_data.items()])
+        await update.message.reply_text("Thanks for providing your information. I've forwarded it to one of our PTs, they will be with you shortly!")
 
-        context.user_data['thread_id'] = thread.id  # Store only the thread ID
+        create_message(context.user_data['thread_id'], f"New user profile:\n{profile_summary}")
+        run = create_run(context.user_data['thread_id'])
+        run = wait_on_run(run, context.user_data['thread_id'])
 
-        # Create assistant session in Supabase with initial state 'STARTED'
-        session_data = {
-            "user_id": user_id,
-            "thread_id": thread.id,
-            "state": "STARTED"
-        }
-        session_response = supabase.table("assistant_sessions").insert(session_data).execute()
-        session_id = session_response.data[0]['id']
-
-        context.user_data['user_id'] = user_id
-        context.user_data['session_id'] = session_id
-
-        profile_summary = "\n".join([f"{key.capitalize()}: {value}" for key, value in user_profile.items()])
-        await context.bot.send_message(chat_id=chat_id, text=f"Thanks for providing your information. I've forwarded it to one of our PTs, they will be with you shortly!")
-
-        create_message(thread.id, profile_summary)
-        logger.info(f"Created message in thread ID: {thread.id}")
-
-        run = create_run(thread.id)
-        run = wait_on_run(run, thread.id)
-        logger.info(f"Run status: {run.status}")
-
-        messages_page = list_messages(thread.id)
-        messages = messages_page.data if hasattr(messages_page, 'data') else []
-        logger.info(f"Retrieved messages: {messages}")
-
+        messages = list_messages(context.user_data['thread_id']).data
         response = next((msg.content[0].text.value for msg in messages if msg.role == 'assistant'), "No response from assistant.")
 
-        # Update the state to 'ONGOING' after LLM has responded
-        supabase.table("assistant_sessions").update({"state": "ONGOING"}).eq("id", session_id).execute()
-
-        logger.info(f"Assistant's response: {response}")
-        await context.bot.send_message(chat_id=chat_id, text=response, parse_mode='Markdown')
-
-        return STATES['ONGOING']
+        await update.message.reply_text(response, parse_mode='Markdown')
+        return ONGOING
 
     except Exception as e:
         logger.error(f"Error in finalize_profile: {str(e)}")
-        await context.bot.send_message(chat_id=chat_id, text="I'm sorry, but there was an error processing your information. Please try again later or contact support.")
+        await update.message.reply_text("I'm sorry, but there was an error processing your information. Please try again later or contact support.")
         return ConversationHandler.END
 
-async def handle_ongoing_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_message = update.message.text
+    thread_id = context.user_data['thread_id']
 
-    thread_id = context.user_data['thread_id']  # Retrieve the thread ID
     create_message(thread_id, user_message)
-    logger.info(f"Created message in thread ID: {thread_id}")
-
-    try:
-        run = create_run(thread_id)
-    except BadRequestError as e:
-        if "already has an active run" in str(e):
-            # Get the active run
-            runs = client.beta.threads.runs.list(thread_id=thread_id, limit=1)
-            if runs.data:
-                active_run = runs.data[0]
-                # Wait for the active run to complete
-                run = wait_on_run(active_run, thread_id)
-            else:
-                logger.error(f"No active run found for thread {thread_id}")
-                await context.bot.send_message(chat_id=chat_id, text="I'm sorry, but there was an error processing your request. Please try again later.")
-                return STATES['ONGOING']
-        else:
-            raise e
-
+    run = create_run(thread_id)
     run = wait_on_run(run, thread_id)
-    logger.info(f"Run status: {run.status}")
 
-    messages_page = list_messages(thread_id)
-    messages = messages_page.data if hasattr(messages_page, 'data') else []
-    logger.info(f"Retrieved messages: {messages}")
-
+    messages = list_messages(thread_id).data
     response = next((msg.content[0].text.value for msg in messages if msg.role == 'assistant'), "No response from assistant.")
 
-    logger.info(f"Assistant's response: {response}")
-    await context.bot.send_message(chat_id=chat_id, text=response, parse_mode='Markdown')
+    await update.message.reply_text(response, parse_mode='Markdown')
+    return ONGOING
 
-    return STATES['ONGOING']
-
-async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="The conversation has been cancelled.")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("The conversation has been cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 def main():
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_KEY")
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(os.getenv("TELEGRAM_BOT_KEY")).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start_conversation)],
+        entry_points=[CommandHandler("start", start)],
         states={
-            **{state: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_next_question)] for state in STATES.values() if state != STATES['ONGOING']},
-            STATES['ONGOING']: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ongoing_conversation)],
+            SHARE_CONTACT: [MessageHandler(filters.CONTACT, handle_contact)],
+            GET_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_age)],
+            GET_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_weight)],
+            GET_HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_height)],
+            ONGOING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     application.add_handler(conv_handler)
