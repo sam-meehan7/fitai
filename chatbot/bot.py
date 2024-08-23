@@ -56,7 +56,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user = user_response.data[0]
         context.user_data.update(user)
         logger.info(f"Existing user {telegram_id} found in database")
-        await update_or_create_session(update, context)
+        await get_or_create_session(update, context)
         await update.message.reply_text(f"Welcome back, {context.user_data['name']}! How can I assist you today?", reply_markup=ReplyKeyboardRemove())
         return ONGOING
     else:
@@ -105,19 +105,50 @@ async def get_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("Please enter a valid height in cm (e.g., 175.5).")
         return GET_HEIGHT
 
-async def update_or_create_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    thread = create_thread()
-    context.user_data['thread_id'] = thread.id
-    logger.info(f"Created new thread {thread.id} for user {context.user_data['telegram_id']}")
+async def get_or_create_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.user_data['id']
 
-    session_data = {
-        "user_id": context.user_data['id'],
-        "thread_id": thread.id,
-        "state": "ONGOING"
-    }
-    session_response = supabase.table("assistant_sessions").insert(session_data).execute()
-    context.user_data['session_id'] = session_response.data[0]['id']
-    logger.info(f"Created new session {context.user_data['session_id']} for user {context.user_data['telegram_id']}")
+    # Try to get the most recent session for the user
+    session_response = supabase.table("assistant_sessions").select("*").eq("user_id", user_id).order("id", desc=True).limit(1).execute()
+
+    if session_response.data:
+        # Existing session found
+        session = session_response.data[0]
+        context.user_data['thread_id'] = session['thread_id']
+        context.user_data['session_id'] = session['id']
+        logger.info(f"Retrieved existing session {session['id']} with thread {session['thread_id']} for user {user_id}")
+
+        # If the session state is not 'ONGOING', update it
+        if session['state'] != 'ONGOING':
+            supabase.table("assistant_sessions").update({"state": "ONGOING"}).eq("id", session['id']).execute()
+            logger.info(f"Updated session {session['id']} state to ONGOING for user {user_id}")
+    else:
+        # No existing session, create a new one
+        thread = create_thread()
+        context.user_data['thread_id'] = thread.id
+        logger.info(f"Created new thread {thread.id} for user {user_id}")
+
+        session_data = {
+            "user_id": user_id,
+            "thread_id": thread.id,
+            "state": "ONGOING"
+        }
+        session_response = supabase.table("assistant_sessions").insert(session_data).execute()
+        context.user_data['session_id'] = session_response.data[0]['id']
+        logger.info(f"Created new session {context.user_data['session_id']} for user {user_id}")
+
+    # Ensure the thread exists and is accessible
+    try:
+        # might want to add a function to check if the thread exists in your assistant module
+        # For now, we'll just log that we're using this thread
+        logger.info(f"Using thread {context.user_data['thread_id']} for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error accessing thread {context.user_data['thread_id']} for user {user_id}: {str(e)}")
+        # If there's an error, create a new thread
+        thread = create_thread()
+        context.user_data['thread_id'] = thread.id
+        supabase.table("assistant_sessions").update({"thread_id": thread.id}).eq("id", context.user_data['session_id']).execute()
+        logger.info(f"Created new thread {thread.id} for user {user_id} due to error")
 
 async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
@@ -134,7 +165,7 @@ async def finalize_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data['id'] = user_response.data[0]['id']
         logger.info(f"User profile finalized and saved to database: {user_data}")
 
-        await update_or_create_session(update, context)
+        await get_or_create_session(update, context)
 
         profile_summary = "\n".join([f"{key.capitalize()}: {value}" for key, value in user_data.items()])
         await update.message.reply_text("Thanks for providing your information. I've forwarded it to one of our PTs, they will be with you shortly!")
