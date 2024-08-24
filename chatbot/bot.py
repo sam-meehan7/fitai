@@ -36,7 +36,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [[KeyboardButton("Share Contact", request_contact=True)]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
     await update.message.reply_text(
-        "Welcome to FitAI! To get started, please share your contact information.",
+        "Welcome to FitAI! To get started, sign in/sign up using the Share Contact button. If you can't see this button, click the square icon with the 4 circles inside it.",
         reply_markup=reply_markup
     )
     return SHARE_CONTACT
