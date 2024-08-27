@@ -234,7 +234,7 @@ async def post_init(application: Application) -> None:
     await setup_menu_commands(application)
 
 def main():
-    application = Application.builder().token(os.getenv("TELEGRAM_BOT_KEY_LOCAL")).post_init(post_init).build()
+    application = Application.builder().token(os.getenv("TELEGRAM_BOT_KEY")).post_init(post_init).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
