@@ -1,6 +1,6 @@
 import os
 import logging
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from assistant import create_thread, create_message, create_run, wait_on_run, list_messages
 from dotenv import load_dotenv
@@ -207,11 +207,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     logger.info(f"User {user_id} cancelled the conversation")
-    await update.message.reply_text("The conversation has been cancelled.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("The conversation has been stopped. Just do /start to talk to one your AI personal trainer again.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message when the command /help is issued."""
+    help_text = (
+        "Here are the available commands:\n\n"
+        "/start - Start the conversation\n"
+        "/cancel - Stop the conversation\n"
+    )
+    await update.message.reply_text(help_text)
+
+async def setup_menu_commands(application: Application) -> None:
+    """Set up the bot commands for the menu."""
+    commands = [
+        BotCommand("start", "Start the conversation"),
+        BotCommand("cancel", "Stop the conversation")
+    ]
+    await application.bot.set_my_commands(commands)
+
+async def post_init(application: Application) -> None:
+    """
+    Post initialization hook for the bot.
+    """
+    await setup_menu_commands(application)
+
 def main():
-    application = Application.builder().token(os.getenv("TELEGRAM_BOT_KEY")).build()
+    application = Application.builder().token(os.getenv("TELEGRAM_BOT_KEY_LOCAL")).post_init(post_init).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -226,6 +249,8 @@ def main():
     )
 
     application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("help", help_command))
+
     logger.info("FitAI Telegram Bot started")
     application.run_polling()
 
